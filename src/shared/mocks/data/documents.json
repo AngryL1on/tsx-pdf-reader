@@ -1,0 +1,12 @@
+[
+  {
+    "id": "doc-contract-001",
+    "title": "Договор поставки (демо)",
+    "pdfUrl": "/sample.pdf"
+  },
+  {
+    "id": "doc-spec-002",
+    "title": "Техническое задание (демо)",
+    "pdfUrl": "/sample.pdf"
+  }
+]

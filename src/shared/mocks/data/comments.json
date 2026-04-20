@@ -1,0 +1,32 @@
+[
+  {
+    "id": "cmt-101",
+    "documentId": "doc-contract-001",
+    "pageIndex": 0,
+    "relX": 0.32,
+    "relY": 0.18,
+    "text": "Проверить сроки поставки по п. 4.2",
+    "author": { "id": "user-1", "name": "Анна Смирнова" },
+    "createdAt": "2026-04-10T09:15:00.000Z"
+  },
+  {
+    "id": "cmt-102",
+    "documentId": "doc-contract-001",
+    "pageIndex": 0,
+    "relX": 0.71,
+    "relY": 0.44,
+    "text": "Нужна правка формулировки про ответственность",
+    "author": { "id": "user-2", "name": "Игорь Петров" },
+    "createdAt": "2026-04-11T14:40:00.000Z"
+  },
+  {
+    "id": "cmt-201",
+    "documentId": "doc-spec-002",
+    "pageIndex": 0,
+    "relX": 0.5,
+    "relY": 0.25,
+    "text": "Уточнить требования к доступности таблиц",
+    "author": { "id": "user-1", "name": "Анна Смирнова" },
+    "createdAt": "2026-04-12T11:05:00.000Z"
+  }
+]
