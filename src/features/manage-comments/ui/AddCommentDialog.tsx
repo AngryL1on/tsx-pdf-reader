@@ -9,13 +9,14 @@ import {
   Typography,
 } from '@mui/material';
 import { useState } from 'react';
-import type { CreateCommentBody } from '@/entities/comment';
+import type { CreateCommentBody, HighlightRectDto } from '@/entities/comment';
 import { useCreateCommentMutation } from '@/features/manage-comments/model/useCommentMutations';
 
 type DraftPoint = {
   pageIndex: number;
   relX: number;
   relY: number;
+  highlightRects: HighlightRectDto[];
 };
 
 type AddCommentDialogProps = {
@@ -38,6 +39,7 @@ export const AddCommentDialog = ({ documentId, open, draft, onClose }: AddCommen
       relX: draft.relX,
       relY: draft.relY,
       text: text.trim(),
+      highlightRects: draft.highlightRects,
     };
     if (!body.text) {
       return;
@@ -53,8 +55,9 @@ export const AddCommentDialog = ({ documentId, open, draft, onClose }: AddCommen
         <Stack spacing={2} sx={{ mt: 1 }}>
           {draft && (
             <Typography variant="body2" color="text.secondary">
-              Страница {draft.pageIndex + 1}, позиция{' '}
-              {(draft.relX * 100).toFixed(1)}% × {(draft.relY * 100).toFixed(1)}%
+              Страница {draft.pageIndex + 1}, центр якоря{' '}
+              {(draft.relX * 100).toFixed(1)}% × {(draft.relY * 100).toFixed(1)}% · фрагментов
+              подсветки: {draft.highlightRects.length}
             </Typography>
           )}
           <TextField

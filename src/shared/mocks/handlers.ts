@@ -1,5 +1,9 @@
 import { http, HttpResponse, passthrough } from 'msw';
-import type { CommentDto, CreateCommentBody } from '@/entities/comment/model/types';
+import type {
+  CommentDto,
+  CreateCommentBody,
+  HighlightRectDto,
+} from '@/entities/comment/model/types';
 import type { DocumentDto } from '@/entities/document/model/types';
 import documentsSeed from '@/shared/mocks/data/documents.json';
 import commentsSeed from '@/shared/mocks/data/comments.json';
@@ -10,6 +14,21 @@ const comments: CommentDto[] = structuredClone(commentsSeed as CommentDto[]);
 const defaultAuthor = { id: 'user-demo', name: 'Демо-пользователь' };
 
 const findDocument = (id: string) => documents.find((item) => item.id === id);
+
+const isValidHighlightRect = (value: unknown): value is HighlightRectDto => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const r = value as HighlightRectDto;
+  const nums = [r.relLeft, r.relTop, r.relWidth, r.relHeight];
+  if (!nums.every((n) => typeof n === 'number' && Number.isFinite(n))) {
+    return false;
+  }
+  if (nums.some((n) => n < 0 || n > 1)) {
+    return false;
+  }
+  return r.relLeft + r.relWidth <= 1 + 1e-5 && r.relTop + r.relHeight <= 1 + 1e-5;
+};
 
 const parseOptionalUser = (request: Request) => {
   const raw = request.headers.get('x-user-id');
@@ -56,6 +75,16 @@ export const handlers = [
     ) {
       return HttpResponse.json({ message: 'Некорректное тело запроса' }, { status: 400 });
     }
+    let highlightRects: HighlightRectDto[] | undefined;
+    if (body.highlightRects !== undefined) {
+      if (!Array.isArray(body.highlightRects) || body.highlightRects.length === 0) {
+        return HttpResponse.json({ message: 'Некорректное тело запроса' }, { status: 400 });
+      }
+      if (!body.highlightRects.every(isValidHighlightRect)) {
+        return HttpResponse.json({ message: 'Некорректное тело запроса' }, { status: 400 });
+      }
+      highlightRects = body.highlightRects;
+    }
     const author = parseOptionalUser(request);
     const comment: CommentDto = {
       id: `cmt-${crypto.randomUUID()}`,
@@ -63,6 +92,7 @@ export const handlers = [
       pageIndex: body.pageIndex,
       relX: body.relX,
       relY: body.relY,
+      ...(highlightRects ? { highlightRects } : {}),
       text: body.text.trim(),
       author,
       createdAt: new Date().toISOString(),

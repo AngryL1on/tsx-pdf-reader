@@ -16,14 +16,20 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { alpha } from '@mui/material/styles';
-import { useMemo, useState, type MouseEventHandler } from 'react';
+import { alpha, type Theme } from '@mui/material/styles';
+import { Fragment, useEffect, useMemo, useRef, useState, type MouseEventHandler } from 'react';
 import { Document, Page } from 'react-pdf';
-import type { CommentDto } from '@/entities/comment';
+import type { CommentDto, HighlightRectDto } from '@/entities/comment';
 import { useCommentsQuery } from '@/entities/comment';
 import { useDocumentQuery } from '@/entities/document';
 import { AddCommentDialog, useDeleteCommentMutation } from '@/features/manage-comments';
-import { toNormalizedPoint } from '@/shared/lib/coords';
+import {
+  centerFromHighlightRects,
+  clientRectsToHighlightDtos,
+  findPresentationRectAtPoint,
+  mergePdfSelectionRects,
+  selectionIsInsideElement,
+} from '@/shared/lib/selectionHighlight';
 import { useContainerWidth } from '@/shared/lib/useContainerWidth';
 import { usePdfFileData } from '@/shared/lib/usePdfFileData';
 
@@ -31,9 +37,16 @@ type PdfWorkspaceProps = {
   documentId: string;
 };
 
-/** Доля страницы: «полоска» как выделение текста вокруг якоря (relX, relY). */
-const HIGHLIGHT_WIDTH_PCT = 34;
-const HIGHLIGHT_HEIGHT_PCT = 2.35;
+type CommentPlacementDraft = {
+  pageIndex: number;
+  relX: number;
+  relY: number;
+  highlightRects: HighlightRectDto[];
+};
+
+/** Доля страницы: запасной маркер для старых комментариев без highlightRects. */
+const LEGACY_HIGHLIGHT_WIDTH_PCT = 34;
+const LEGACY_HIGHLIGHT_HEIGHT_PCT = 2.35;
 
 const sortComments = (items: CommentDto[]) =>
   [...items].sort((a, b) => {
@@ -54,11 +67,11 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
   const [numPages, setNumPages] = useState(0);
   const [placementMode, setPlacementMode] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [draft, setDraft] = useState<{ pageIndex: number; relX: number; relY: number } | null>(
-    null,
-  );
+  const [draft, setDraft] = useState<CommentPlacementDraft | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [dialogKey, setDialogKey] = useState(0);
+
+  const pageSurfaceRef = useRef<HTMLDivElement>(null);
 
   const sortedComments = useMemo(() => sortComments(comments), [comments]);
   const pageComments = useMemo(
@@ -67,6 +80,44 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
   );
 
   const pageWidth = Math.max(280, Math.min(containerWidth - 16, 960));
+
+  useEffect(() => {
+    if (!placementMode || pdfFile.status !== 'ready') {
+      return;
+    }
+    const onWindowMouseUp = () => {
+      const surface = pageSurfaceRef.current;
+      if (!surface) {
+        return;
+      }
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) {
+        return;
+      }
+      if (!selectionIsInsideElement(selection, surface)) {
+        return;
+      }
+      const pageRect = surface.getBoundingClientRect();
+      const merged = mergePdfSelectionRects(Array.from(selection.getRangeAt(0).getClientRects()));
+      const highlightRects = clientRectsToHighlightDtos(merged, pageRect);
+      selection.removeAllRanges();
+      if (!highlightRects.length) {
+        return;
+      }
+      const { relX, relY } = centerFromHighlightRects(highlightRects);
+      setDraft({
+        pageIndex: pageNumber - 1,
+        relX,
+        relY,
+        highlightRects,
+      });
+      setDialogKey((value) => value + 1);
+      setDialogOpen(true);
+      setPlacementMode(false);
+    };
+    window.addEventListener('mouseup', onWindowMouseUp);
+    return () => window.removeEventListener('mouseup', onWindowMouseUp);
+  }, [placementMode, pdfFile.status, pageNumber]);
 
   if (isPending) {
     return (
@@ -87,13 +138,29 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
     );
   }
 
-  const handlePageClick: MouseEventHandler<HTMLDivElement> = (event) => {
+  const handleSurfaceClick: MouseEventHandler<HTMLDivElement> = (event) => {
     if (!placementMode) {
       return;
     }
-    const rect = event.currentTarget.getBoundingClientRect();
-    const { relX, relY } = toNormalizedPoint(event.clientX, event.clientY, rect);
-    setDraft({ pageIndex: pageNumber - 1, relX, relY });
+    const surface = pageSurfaceRef.current;
+    if (!surface) {
+      return;
+    }
+    const glyph = findPresentationRectAtPoint(event.clientX, event.clientY, surface);
+    if (!glyph) {
+      return;
+    }
+    const highlightRects = clientRectsToHighlightDtos([glyph], surface.getBoundingClientRect());
+    if (!highlightRects.length) {
+      return;
+    }
+    const { relX, relY } = centerFromHighlightRects(highlightRects);
+    setDraft({
+      pageIndex: pageNumber - 1,
+      relX,
+      relY,
+      highlightRects,
+    });
     setDialogKey((value) => value + 1);
     setDialogOpen(true);
     setPlacementMode(false);
@@ -113,8 +180,9 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
                 {document.title}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                Нажмите кнопку ниже, затем по строке текста на странице — участок будет отмечен
-                синим, как выделение.
+                Включите режим ниже, затем выделите текст мышью на странице (как в редакторе) — под
+                выделение попадут точные прямоугольники. Либо один раз кликните по букве: подсветится
+                соответствующий фрагмент text layer.
               </Typography>
             </Box>
             <ToggleButton
@@ -195,8 +263,9 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
                 }}
               >
                 <Box
+                  ref={pageSurfaceRef}
                   sx={{ position: 'relative', display: 'inline-block' }}
-                  onClick={handlePageClick}
+                  onClick={handleSurfaceClick}
                 >
                   <Page
                     pageNumber={pageNumber}
@@ -213,6 +282,65 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
                   >
                     {pageComments.map((comment) => {
                       const selected = selectedId === comment.id;
+                      const rects =
+                        comment.highlightRects && comment.highlightRects.length > 0
+                          ? comment.highlightRects
+                          : null;
+                      const segmentStyle = {
+                        pointerEvents: 'auto' as const,
+                        cursor: 'pointer' as const,
+                        borderRadius: '1px',
+                        bgcolor: (theme: Theme) =>
+                          selected
+                            ? alpha(theme.palette.primary.main, 0.42)
+                            : alpha(theme.palette.primary.main, 0.26),
+                        boxShadow: selected
+                          ? (theme: Theme) => `inset 0 0 0 2px ${theme.palette.primary.main}`
+                          : 'none',
+                        zIndex: selected ? 2 : 1,
+                        transition: (theme: Theme) =>
+                          theme.transitions.create(['background-color', 'box-shadow'], {
+                            duration: theme.transitions.duration.shorter,
+                          }),
+                      };
+                      if (rects) {
+                        return (
+                          <Fragment key={comment.id}>
+                            {rects.map((r, index) => (
+                              <Tooltip
+                                key={`${comment.id}-${String(index)}`}
+                                title={comment.text}
+                                followCursor
+                              >
+                                <Box
+                                  role="button"
+                                  tabIndex={0}
+                                  aria-label={`Комментарий, страница ${comment.pageIndex + 1}: ${comment.text}`}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setSelectedId(comment.id);
+                                  }}
+                                  onKeyDown={(event) => {
+                                    if (event.key === 'Enter' || event.key === ' ') {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      setSelectedId(comment.id);
+                                    }
+                                  }}
+                                  sx={{
+                                    position: 'absolute',
+                                    left: `${r.relLeft * 100}%`,
+                                    top: `${r.relTop * 100}%`,
+                                    width: `${r.relWidth * 100}%`,
+                                    height: `${r.relHeight * 100}%`,
+                                    ...segmentStyle,
+                                  }}
+                                />
+                              </Tooltip>
+                            ))}
+                          </Fragment>
+                        );
+                      }
                       return (
                         <Tooltip key={comment.id} title={comment.text} followCursor>
                           <Box
@@ -234,24 +362,10 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
                               position: 'absolute',
                               left: `${comment.relX * 100}%`,
                               top: `${comment.relY * 100}%`,
-                              width: `${HIGHLIGHT_WIDTH_PCT}%`,
-                              height: `${HIGHLIGHT_HEIGHT_PCT}%`,
+                              width: `${LEGACY_HIGHLIGHT_WIDTH_PCT}%`,
+                              height: `${LEGACY_HIGHLIGHT_HEIGHT_PCT}%`,
                               transform: 'translate(-12%, -50%)',
-                              pointerEvents: 'auto',
-                              cursor: 'pointer',
-                              borderRadius: '1px',
-                              bgcolor: (theme) =>
-                                selected
-                                  ? alpha(theme.palette.primary.main, 0.42)
-                                  : alpha(theme.palette.primary.main, 0.26),
-                              boxShadow: selected
-                                ? (theme) => `inset 0 0 0 2px ${theme.palette.primary.main}`
-                                : 'none',
-                              zIndex: selected ? 2 : 1,
-                              transition: (theme) =>
-                                theme.transitions.create(['background-color', 'box-shadow'], {
-                                  duration: theme.transitions.duration.shorter,
-                                }),
+                              ...segmentStyle,
                             }}
                           />
                         </Tooltip>
@@ -326,7 +440,7 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
             {sortedComments.length === 0 && (
               <Box sx={{ p: 2 }}>
                 <Typography variant="body2" color="text.secondary">
-                  Пока нет комментариев. Добавьте первый, выбрав место на странице.
+                  Пока нет комментариев. Добавьте первый, выделив текст на странице.
                 </Typography>
               </Box>
             )}
