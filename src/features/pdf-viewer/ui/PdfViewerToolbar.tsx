@@ -108,6 +108,7 @@ export const PdfViewerToolbar = ({
       setPageInput(String(pageNumber));
       return;
     }
+    pageInputFocused.current = false;
     onPageNumberChange(parsed);
   };
 
@@ -191,7 +192,8 @@ export const PdfViewerToolbar = ({
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
               event.preventDefault();
-              event.currentTarget.blur();
+              commitPageInput();
+              (event.currentTarget as HTMLInputElement).blur();
             }
           }}
           slotProps={{

@@ -3,7 +3,7 @@
  * (`import.meta.env.BASE_URL`), otherwise the file 404s when the app is not at `/`.
  */
 export const resolvePdfSrc = (pdfUrl: string): string => {
-  if (/^https?:\/\//i.test(pdfUrl)) {
+  if (/^(https?:|blob:|data:)/i.test(pdfUrl)) {
     return pdfUrl;
   }
   const path = pdfUrl.replace(/^\/+/, '');

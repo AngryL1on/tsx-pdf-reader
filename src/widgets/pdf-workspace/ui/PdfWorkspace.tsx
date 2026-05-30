@@ -20,6 +20,7 @@ import { Document, Page } from 'react-pdf';
 import type { CommentDto } from '@/entities/comment';
 import { useCommentsQuery } from '@/entities/comment';
 import { useDocumentQuery } from '@/entities/document';
+import type { EmbeddedPdfAttachment } from '@/entities/document-attachment';
 import {
   CommentsPanel,
   CommentToolsBar,
@@ -71,8 +72,15 @@ import {
 import { useContainerWidth } from '@/shared/lib/useContainerWidth';
 import { usePdfFileData } from '@/shared/lib/usePdfFileData';
 
+export type PdfWorkspacePdfSource = {
+  filename: string;
+  pdfUrl: string;
+};
+
 type PdfWorkspaceProps = {
   documentId: string;
+  /** Просмотр прикреплённого PDF вместо основного файла документа. */
+  pdfSource?: PdfWorkspacePdfSource;
 };
 
 const rootCommentsOnPage = (items: CommentDto[], pageIndex: number) =>
@@ -81,7 +89,7 @@ const rootCommentsOnPage = (items: CommentDto[], pageIndex: number) =>
 const clampPage = (page: number, numPages: number) =>
   Math.min(Math.max(page, 1), Math.max(numPages, 1));
 
-export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
+export const PdfWorkspace = ({ documentId, pdfSource }: PdfWorkspaceProps) => {
   const theme = useTheme();
   const isMobile = useMediaQuery(theme.breakpoints.down('lg'));
 
@@ -92,11 +100,14 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
     height: containerHeight,
   } = useContainerWidth<HTMLDivElement>();
   const fullscreenRef = useRef<HTMLDivElement>(null);
+  const scrollToPageOnNavigate = useRef(false);
 
   const { data: document, isPending, isError, error } = useDocumentQuery(documentId);
   const { data: comments = [] } = useCommentsQuery(documentId);
   const createMutation = useCreateCommentMutation(documentId);
-  const pdfFile = usePdfFileData(document?.pdfUrl);
+  const pdfUrl = pdfSource?.pdfUrl ?? document?.pdfUrl;
+  const pdfFile = usePdfFileData(pdfUrl);
+  const isAttachmentView = Boolean(pdfSource);
 
   const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
@@ -121,8 +132,8 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
   const [outline, setOutline] = useState<OutlineItem[]>([]);
   const [outlineLoading, setOutlineLoading] = useState(false);
-  const [attachments, setAttachments] = useState<{ filename: string }[]>([]);
-  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const [embeddedAttachments, setEmbeddedAttachments] = useState<EmbeddedPdfAttachment[]>([]);
+  const [embeddedAttachmentsLoading, setEmbeddedAttachmentsLoading] = useState(false);
 
   const [commentTool, setCommentTool] = useState<CommentTool>('view');
   const [highlightColor, setHighlightColor] = useState(loadStoredHighlightColor);
@@ -196,18 +207,46 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
 
   useHandPan(handPanEnabled, scrollContainerElementRef);
 
+  const scrollToPageElement = useCallback((page: number) => {
+    const tryScroll = (attempt = 0) => {
+      const container = scrollContainerElementRef.current;
+      const target = container?.querySelector<HTMLElement>(
+        `[data-pdf-page="${String(page)}"]`,
+      );
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        return;
+      }
+      if (attempt < 8) {
+        requestAnimationFrame(() => tryScroll(attempt + 1));
+      }
+    };
+    tryScroll();
+  }, []);
+
   const goToPage = useCallback(
     (page: number) => {
       const clamped = clampPage(page, numPages);
+      scrollToPageOnNavigate.current = true;
       setPageNumber(clamped);
-      const container = scrollContainerElementRef.current;
-      const target = container?.querySelector<HTMLElement>(
-        `[data-pdf-page="${String(clamped)}"]`,
-      );
-      target?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     },
     [numPages],
   );
+
+  useEffect(() => {
+    if (!scrollToPageOnNavigate.current || numPages <= 0) {
+      return;
+    }
+    scrollToPageOnNavigate.current = false;
+    scrollToPageElement(pageNumber);
+  }, [
+    pageNumber,
+    numPages,
+    scrollMode,
+    spreadMode,
+    pdfFile.status,
+    scrollToPageElement,
+  ]);
 
   usePageVisibility(
     scrollContainerElementRef,
@@ -250,28 +289,52 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
 
   const loadSidePanelData = useCallback(async (loadedPdf: PDFDocumentProxy) => {
     setOutlineLoading(true);
-    setAttachmentsLoading(true);
+    setEmbeddedAttachmentsLoading(true);
     try {
       const [outlineResult, rawAttachments] = await Promise.all([
         loadPdfOutline(loadedPdf),
         loadedPdf.getAttachments().catch(() => null),
       ]);
       setOutline(outlineResult);
-      if (!rawAttachments) {
-        setAttachments([]);
-      } else {
-        const items = Object.values(rawAttachments) as { filename?: string }[];
-        setAttachments(
-          items.map((item) => ({
-            filename: item.filename ?? 'attachment',
-          })),
-        );
-      }
+      setEmbeddedAttachments((previous) => {
+        previous.forEach((item) => URL.revokeObjectURL(item.blobUrl));
+        if (!rawAttachments) {
+          return [];
+        }
+        return Object.entries(rawAttachments).flatMap(([key, value]) => {
+          const item = value as {
+            filename?: string;
+            content?: Uint8Array;
+            mimeType?: string;
+          };
+          if (!item.content?.length) {
+            return [];
+          }
+          const mimeType = item.mimeType ?? 'application/pdf';
+          const blob = new Blob([Uint8Array.from(item.content)], { type: mimeType });
+          return [
+            {
+              key,
+              filename: item.filename ?? key,
+              mimeType,
+              sizeBytes: item.content.length,
+              blobUrl: URL.createObjectURL(blob),
+            },
+          ];
+        });
+      });
     } finally {
       setOutlineLoading(false);
-      setAttachmentsLoading(false);
+      setEmbeddedAttachmentsLoading(false);
     }
   }, []);
+
+  useEffect(
+    () => () => {
+      embeddedAttachments.forEach((item) => URL.revokeObjectURL(item.blobUrl));
+    },
+    [embeddedAttachments],
+  );
 
   useEffect(() => {
     if (!pdf || !findOpen || !findQuery.trim()) {
@@ -594,9 +657,19 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
           }}
         >
           <Box className="pdf-workspace-chrome" sx={{ px: 2, pt: 1.5, pb: 0.5, flexShrink: 0 }}>
-            <Typography variant="h6" sx={{ fontWeight: 600 }} noWrap title={document.title}>
-              {document.title}
+            <Typography
+              variant="h6"
+              sx={{ fontWeight: 600 }}
+              noWrap
+              title={pdfSource?.filename ?? document.title}
+            >
+              {pdfSource?.filename ?? document.title}
             </Typography>
+            {isAttachmentView && (
+              <Typography variant="caption" color="text.secondary" noWrap title={document.title}>
+                Вложение к документу «{document.title}»
+              </Typography>
+            )}
           </Box>
 
           <Box className="pdf-workspace-chrome" sx={{ flexShrink: 0 }}>
@@ -724,6 +797,7 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
                       }}
                     >
                       <PdfSidePanel
+                        documentId={documentId}
                         tab={sidePanelTab}
                         onTabChange={setSidePanelTab}
                         numPages={numPages}
@@ -736,8 +810,8 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
                         }}
                         outline={outline}
                         outlineLoading={outlineLoading}
-                        attachments={attachments}
-                        attachmentsLoading={attachmentsLoading}
+                        embeddedAttachments={embeddedAttachments}
+                        embeddedAttachmentsLoading={embeddedAttachmentsLoading}
                       />
                     </Box>
                   )}

@@ -1,1 +1,1 @@
-export { PdfWorkspace } from './ui/PdfWorkspace';
+export { PdfWorkspace, type PdfWorkspacePdfSource } from './ui/PdfWorkspace';
