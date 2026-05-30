@@ -39,18 +39,14 @@ import {
 import {
   DEFAULT_SCALE,
   DEFAULT_SCALE_VALUE,
-  DocumentPropertiesDialog,
   PdfFindBar,
   PdfSidePanel,
   PdfViewerMenu,
   createFindTextRenderer,
   PdfViewerToolbar,
   buildSpreadGroups,
-  downloadPdfBytes,
-  loadPdfDocumentProperties,
   loadPdfOutline,
   pagesForScrollPageMode,
-  printPdfBytes,
   resolvePdfScale,
   scaleByDelta,
   searchPdfText,
@@ -61,7 +57,6 @@ import {
   type CursorTool,
   type FindMatch,
   type OutlineItem,
-  type PdfDocumentProperties,
   type ScrollMode,
   type SidePanelTab,
   type SpreadMode,
@@ -96,7 +91,7 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
     width: containerWidth,
     height: containerHeight,
   } = useContainerWidth<HTMLDivElement>();
-  const viewerContainerRef = useRef<HTMLDivElement>(null);
+  const fullscreenRef = useRef<HTMLDivElement>(null);
 
   const { data: document, isPending, isError, error } = useDocumentQuery(documentId);
   const { data: comments = [] } = useCommentsQuery(documentId);
@@ -124,10 +119,6 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
     () => new Map(),
   );
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
-  const [propertiesOpen, setPropertiesOpen] = useState(false);
-  const [documentProperties, setDocumentProperties] = useState<PdfDocumentProperties | null>(
-    null,
-  );
   const [outline, setOutline] = useState<OutlineItem[]>([]);
   const [outlineLoading, setOutlineLoading] = useState(false);
   const [attachments, setAttachments] = useState<{ filename: string }[]>([]);
@@ -155,9 +146,29 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
   const annotationActive = commentTool !== 'view';
   const handPanEnabled = commentTool === 'view' && cursorTool === 'hand' && !pendingDraft;
   const findActive = findOpen && Boolean(findQuery.trim());
-  const enablePdfTextLayer = (commentTool === 'text' && !pendingDraft) || findActive;
+  const canSelectPdfText =
+    !pendingDraft && commentTool === 'view' && cursorTool === 'select';
+  const enablePdfTextLayer =
+    canSelectPdfText || (commentTool === 'text' && !pendingDraft) || findActive;
   const pageWidth = Math.max(120, Math.round(pageLayoutWidth));
   const activeFindMatch = findMatches[activeFindIndex] ?? null;
+
+  const enterPresentationMode = useCallback(async () => {
+    const element = fullscreenRef.current;
+    if (!element) {
+      return;
+    }
+    setMenuAnchor(null);
+    try {
+      if (window.document.fullscreenElement === element) {
+        await window.document.exitFullscreen();
+      } else {
+        await element.requestFullscreen();
+      }
+    } catch {
+      /* fullscreen API unavailable or denied */
+    }
+  }, []);
 
   const closeFind = useCallback(() => {
     const container = scrollContainerElementRef.current;
@@ -187,9 +198,12 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
 
   const goToPage = useCallback(
     (page: number) => {
-      setPageNumber(clampPage(page, numPages));
+      const clamped = clampPage(page, numPages);
+      setPageNumber(clamped);
       const container = scrollContainerElementRef.current;
-      const target = container?.querySelector<HTMLElement>(`[data-pdf-page="${String(page)}"]`);
+      const target = container?.querySelector<HTMLElement>(
+        `[data-pdf-page="${String(clamped)}"]`,
+      );
       target?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     },
     [numPages],
@@ -338,22 +352,6 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
 
   const zoomOut = () => {
     applyNumericZoom(scaleByDelta(currentScale, -1));
-  };
-
-  const handleDownload = () => {
-    if (pdfFile.status !== 'ready') {
-      return;
-    }
-    downloadPdfBytes(pdfFile.file.data, document?.title ?? 'document.pdf');
-    setMenuAnchor(null);
-  };
-
-  const handlePrint = () => {
-    if (pdfFile.status !== 'ready') {
-      return;
-    }
-    printPdfBytes(pdfFile.file.data);
-    setMenuAnchor(null);
   };
 
   usePdfViewerShortcuts(
@@ -529,20 +527,6 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
     </Stack>
   );
 
-  const openDocumentProperties = async () => {
-    if (!pdf || pdfFile.status !== 'ready') {
-      return;
-    }
-    setPropertiesOpen(true);
-    const props = await loadPdfDocumentProperties({
-      pdf,
-      fileName: document?.title ?? 'document.pdf',
-      fileSizeBytes: pdfFile.file.data.byteLength,
-    });
-    setDocumentProperties(props);
-    setMenuAnchor(null);
-  };
-
   if (isPending) {
     return (
       <Stack spacing={1} sx={{ height: '100%', alignItems: 'center', justifyContent: 'center' }}>
@@ -569,7 +553,8 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
     overflow: 'auto',
     p: { xs: 1, sm: 2 },
     cursor: handPanEnabled ? 'grab' : 'default',
-    userSelect: commentTool === 'text' ? 'text' : annotationActive ? 'none' : 'auto',
+    userSelect:
+      canSelectPdfText || commentTool === 'text' ? 'text' : annotationActive ? 'none' : 'auto',
     ...(scrollMode === 'horizontal' && {
       display: 'flex',
       flexDirection: 'row',
@@ -596,13 +581,25 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
         direction={{ xs: 'column', lg: 'row' }}
         sx={{ height: '100%', minHeight: 0, overflow: 'hidden' }}
       >
-        <Stack sx={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
-          <Box sx={{ px: 2, pt: 1.5, pb: 0.5, flexShrink: 0 }}>
+        <Box
+          ref={fullscreenRef}
+          className="pdf-workspace-fullscreen"
+          sx={{
+            flex: 1,
+            minWidth: 0,
+            minHeight: 0,
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <Box className="pdf-workspace-chrome" sx={{ px: 2, pt: 1.5, pb: 0.5, flexShrink: 0 }}>
             <Typography variant="h6" sx={{ fontWeight: 600 }} noWrap title={document.title}>
               {document.title}
             </Typography>
           </Box>
 
+          <Box className="pdf-workspace-chrome" sx={{ flexShrink: 0 }}>
           <PdfViewerToolbar
             pageNumber={pageNumber}
             numPages={numPages}
@@ -624,8 +621,10 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
             onToggleFind={() => (findOpen ? closeFind() : setFindOpen(true))}
             onOpenMenu={setMenuAnchor}
           />
+          </Box>
 
           {findOpen && (
+            <Box className="pdf-workspace-chrome" sx={{ flexShrink: 0 }}>
             <PdfFindBar
               query={findQuery}
               caseSensitive={findCaseSensitive}
@@ -638,8 +637,10 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
               onNext={() => navigateFind(1)}
               onClose={closeFind}
             />
+            </Box>
           )}
 
+          <Box className="pdf-workspace-chrome" sx={{ flexShrink: 0 }}>
           <CommentToolsBar
             tool={commentTool}
             highlightColor={highlightColor}
@@ -652,9 +653,10 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
               }
             }}
           />
+          </Box>
 
           <Box
-            ref={viewerContainerRef}
+            className="pdf-fullscreen-viewer"
             sx={{ flex: 1, minHeight: 0, display: 'flex', position: 'relative', overflow: 'hidden' }}
           >
             {pdfFile.status === 'error' && (
@@ -742,7 +744,11 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
                   <Box
                     sx={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', overflow: 'hidden' }}
                   >
-                    <Box ref={scrollContainerRef} sx={scrollContainerSx}>
+                    <Box
+                      ref={scrollContainerRef}
+                      className="pdf-fullscreen-scroll"
+                      sx={scrollContainerSx}
+                    >
                       {scrollMode === 'page' &&
                         buildSpreadGroups(numPages, spreadMode)
                           .filter((group) => group.some((page) => visiblePages.includes(page)))
@@ -767,7 +773,7 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
               </Document>
             )}
           </Box>
-        </Stack>
+        </Box>
 
         <CommentsPanel
           documentId={documentId}
@@ -791,22 +797,7 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
         onCursorToolChange={setCursorTool}
         onRotateCw={() => setRotation((value) => (value + 90) % 360)}
         onRotateCcw={() => setRotation((value) => (value + 270) % 360)}
-        onDownload={handleDownload}
-        onPrint={handlePrint}
-        onPresentationMode={() => {
-          void viewerContainerRef.current?.requestFullscreen();
-          setMenuAnchor(null);
-        }}
-        onDocumentProperties={() => void openDocumentProperties()}
-      />
-
-      <DocumentPropertiesDialog
-        open={propertiesOpen}
-        properties={documentProperties}
-        onClose={() => {
-          setPropertiesOpen(false);
-          setDocumentProperties(null);
-        }}
+        onPresentationMode={() => void enterPresentationMode()}
       />
     </>
   );

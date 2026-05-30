@@ -49,3 +49,31 @@ body {
   background-color: rgba(66, 165, 245, 0.75);
   box-shadow: 0 0 0 1px #42a5f5;
 }
+
+/* Полноэкранный режим PDF (как presentation mode в pdf.js) */
+.pdf-workspace-fullscreen:fullscreen {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  background: #525659;
+  overflow: hidden;
+}
+
+.pdf-workspace-fullscreen:fullscreen .pdf-workspace-chrome {
+  display: none;
+}
+
+.pdf-workspace-fullscreen:fullscreen .pdf-fullscreen-viewer {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.pdf-workspace-fullscreen:fullscreen .pdf-fullscreen-scroll {
+  height: 100%;
+  padding: 0;
+}
