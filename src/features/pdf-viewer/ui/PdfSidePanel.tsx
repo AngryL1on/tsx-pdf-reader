@@ -14,9 +14,12 @@ import {
   Typography,
 } from '@mui/material';
 import { Page } from 'react-pdf';
+import { DocumentAttachmentsPanel } from '@/features/document-attachments';
+import type { EmbeddedPdfAttachment } from '@/entities/document-attachment';
 import type { OutlineItem, SidePanelTab } from '@/features/pdf-viewer/model/types';
 
 type PdfSidePanelProps = {
+  documentId: string;
   tab: SidePanelTab;
   onTabChange: (tab: SidePanelTab) => void;
   numPages: number;
@@ -24,8 +27,8 @@ type PdfSidePanelProps = {
   onPageSelect: (page: number) => void;
   outline: OutlineItem[];
   outlineLoading: boolean;
-  attachments: { filename: string }[];
-  attachmentsLoading: boolean;
+  embeddedAttachments: EmbeddedPdfAttachment[];
+  embeddedAttachmentsLoading: boolean;
 };
 
 const OutlineTree = ({
@@ -63,6 +66,7 @@ const OutlineTree = ({
 );
 
 export const PdfSidePanel = ({
+  documentId,
   tab,
   onTabChange,
   numPages,
@@ -70,8 +74,8 @@ export const PdfSidePanel = ({
   onPageSelect,
   outline,
   outlineLoading,
-  attachments,
-  attachmentsLoading,
+  embeddedAttachments,
+  embeddedAttachmentsLoading,
 }: PdfSidePanelProps) => {
   if (tab === 'none') {
     return null;
@@ -159,24 +163,11 @@ export const PdfSidePanel = ({
         )}
 
         {tab === 'attachments' && (
-          <>
-            {attachmentsLoading && (
-              <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>
-                Загрузка вложений…
-              </Typography>
-            )}
-            {!attachmentsLoading && attachments.length === 0 && (
-              <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>
-                Вложений нет
-              </Typography>
-            )}
-            {!attachmentsLoading &&
-              attachments.map((item) => (
-                <Typography key={item.filename} variant="body2" sx={{ px: 1, py: 0.5 }}>
-                  {item.filename}
-                </Typography>
-              ))}
-          </>
+          <DocumentAttachmentsPanel
+            documentId={documentId}
+            embedded={embeddedAttachments}
+            embeddedLoading={embeddedAttachmentsLoading}
+          />
         )}
       </Box>
     </Paper>
