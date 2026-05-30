@@ -5,6 +5,7 @@ import type {
   HighlightRectDto,
   UpdateCommentBody,
 } from '@/entities/comment/model/types';
+import type { DocumentAttachmentDto } from '@/entities/document-attachment/model/types';
 import type { DocumentDto } from '@/entities/document/model/types';
 import { isValidHighlightColor } from '@/features/manage-comments/model/highlightColors';
 import documentsSeed from '@/shared/mocks/data/documents.json';
@@ -12,6 +13,11 @@ import commentsSeed from '@/shared/mocks/data/comments.json';
 
 const documents: DocumentDto[] = [...documentsSeed];
 const comments: CommentDto[] = structuredClone(commentsSeed as CommentDto[]);
+
+type StoredAttachment = DocumentAttachmentDto & { data: Uint8Array };
+const attachments: StoredAttachment[] = [];
+
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 const defaultAuthor = { id: 'user-demo', name: 'Демо-пользователь' };
 
@@ -178,6 +184,87 @@ export const handlers = [
     }
 
     return HttpResponse.json(updated);
+  }),
+
+  http.get('/api/documents/:documentId/attachments', ({ params }) => {
+    const documentId = String(params.documentId);
+    if (!findDocument(documentId)) {
+      return HttpResponse.json({ message: 'Документ не найден' }, { status: 404 });
+    }
+    const list = attachments
+      .filter((item) => item.documentId === documentId)
+      .map(({ id, documentId: docId, filename, mimeType, sizeBytes, createdAt }) => ({
+        id,
+        documentId: docId,
+        filename,
+        mimeType,
+        sizeBytes,
+        createdAt,
+      }));
+    return HttpResponse.json(list);
+  }),
+
+  http.post('/api/documents/:documentId/attachments', async ({ params, request }) => {
+    const documentId = String(params.documentId);
+    if (!findDocument(documentId)) {
+      return HttpResponse.json({ message: 'Документ не найден' }, { status: 404 });
+    }
+    const formData = await request.formData();
+    const file = formData.get('file');
+    if (!(file instanceof File)) {
+      return HttpResponse.json({ message: 'Файл не передан' }, { status: 400 });
+    }
+    const isPdf =
+      file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    if (!isPdf) {
+      return HttpResponse.json({ message: 'Допустимы только PDF' }, { status: 400 });
+    }
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      return HttpResponse.json({ message: 'Файл больше 25 МБ' }, { status: 400 });
+    }
+    const data = new Uint8Array(await file.arrayBuffer());
+    const item: StoredAttachment = {
+      id: `att-${crypto.randomUUID()}`,
+      documentId,
+      filename: file.name,
+      mimeType: file.type || 'application/pdf',
+      sizeBytes: file.size,
+      createdAt: new Date().toISOString(),
+      data,
+    };
+    attachments.push(item);
+    const { data: _data, ...dto } = item;
+    return HttpResponse.json(dto, { status: 201 });
+  }),
+
+  http.get('/api/documents/:documentId/attachments/:attachmentId/file', ({ params }) => {
+    const documentId = String(params.documentId);
+    const attachmentId = String(params.attachmentId);
+    const item = attachments.find(
+      (entry) => entry.documentId === documentId && entry.id === attachmentId,
+    );
+    if (!item) {
+      return HttpResponse.json({ message: 'Вложение не найдено' }, { status: 404 });
+    }
+    return new HttpResponse(item.data, {
+      headers: {
+        'Content-Type': item.mimeType,
+        'Content-Disposition': `inline; filename="${encodeURIComponent(item.filename)}"`,
+      },
+    });
+  }),
+
+  http.delete('/api/documents/:documentId/attachments/:attachmentId', ({ params }) => {
+    const documentId = String(params.documentId);
+    const attachmentId = String(params.attachmentId);
+    const index = attachments.findIndex(
+      (entry) => entry.documentId === documentId && entry.id === attachmentId,
+    );
+    if (index === -1) {
+      return HttpResponse.json({ message: 'Вложение не найдено' }, { status: 404 });
+    }
+    attachments.splice(index, 1);
+    return new HttpResponse(null, { status: 204 });
   }),
 
   http.delete('/api/comments/:commentId', ({ params }) => {
