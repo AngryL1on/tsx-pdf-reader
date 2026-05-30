@@ -1,9 +1,6 @@
 import {
-  Download as DownloadIcon,
   Fullscreen as FullscreenIcon,
-  InfoOutlined as InfoOutlinedIcon,
   PanTool as PanToolIcon,
-  Print as PrintIcon,
   RotateLeft as RotateLeftIcon,
   RotateRight as RotateRightIcon,
   TouchApp as TouchAppIcon,
@@ -24,10 +21,7 @@ type PdfViewerMenuProps = {
   onCursorToolChange: (tool: CursorTool) => void;
   onRotateCw: () => void;
   onRotateCcw: () => void;
-  onDownload: () => void;
-  onPrint: () => void;
   onPresentationMode: () => void;
-  onDocumentProperties: () => void;
 };
 
 const checked = (active: boolean) => (active ? '✓ ' : '');
@@ -45,10 +39,7 @@ export const PdfViewerMenu = ({
   onCursorToolChange,
   onRotateCw,
   onRotateCcw,
-  onDownload,
-  onPrint,
   onPresentationMode,
-  onDocumentProperties,
 }: PdfViewerMenuProps) => (
   <Menu anchorEl={anchorEl} open={open} onClose={onClose}>
     <MenuItem disabled>
@@ -106,21 +97,9 @@ export const PdfViewerMenu = ({
     </MenuItem>
 
     <Divider />
-    <MenuItem onClick={onDownload}>
-      <DownloadIcon fontSize="small" sx={{ mr: 1 }} />
-      Скачать
-    </MenuItem>
-    <MenuItem onClick={onPrint}>
-      <PrintIcon fontSize="small" sx={{ mr: 1 }} />
-      Печать
-    </MenuItem>
     <MenuItem onClick={onPresentationMode}>
       <FullscreenIcon fontSize="small" sx={{ mr: 1 }} />
       Полноэкранный режим
-    </MenuItem>
-    <MenuItem onClick={onDocumentProperties}>
-      <InfoOutlinedIcon fontSize="small" sx={{ mr: 1 }} />
-      Свойства документа
     </MenuItem>
   </Menu>
 );
