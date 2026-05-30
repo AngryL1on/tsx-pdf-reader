@@ -1,32 +1,75 @@
-import { DeleteOutlined as DeleteOutlineIcon } from '@mui/icons-material';
 import {
   Alert,
   Box,
-  Chip,
   CircularProgress,
-  Divider,
-  IconButton,
-  List,
-  ListItem,
-  ListItemButton,
-  Pagination,
-  Paper,
   Stack,
-  ToggleButton,
-  Tooltip,
   Typography,
+  useMediaQuery,
+  useTheme,
 } from '@mui/material';
-import { alpha, type Theme } from '@mui/material/styles';
-import { Fragment, useEffect, useMemo, useRef, useState, type MouseEventHandler } from 'react';
+import type { PDFDocumentProxy } from 'pdfjs-dist';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEventHandler,
+} from 'react';
 import { Document, Page } from 'react-pdf';
-import type { CommentDto, HighlightRectDto } from '@/entities/comment';
+import type { CommentDto } from '@/entities/comment';
 import { useCommentsQuery } from '@/entities/comment';
 import { useDocumentQuery } from '@/entities/document';
-import { AddCommentDialog, useDeleteCommentMutation } from '@/features/manage-comments';
+import {
+  CommentsPanel,
+  CommentToolsBar,
+  PageAnnotationLayer,
+  useCreateCommentMutation,
+  type CommentTool,
+  type PendingCommentDraft,
+} from '@/features/manage-comments';
+import {
+  loadStoredHighlightColor,
+  storeHighlightColor,
+} from '@/features/manage-comments/model/highlightColors';
+import {
+  centerFromDraft,
+  pinHighlightRect,
+} from '@/features/manage-comments/lib/annotationGeometry';
+import {
+  DEFAULT_SCALE,
+  DEFAULT_SCALE_VALUE,
+  DocumentPropertiesDialog,
+  PdfFindBar,
+  PdfSidePanel,
+  PdfViewerMenu,
+  createFindTextRenderer,
+  PdfViewerToolbar,
+  buildSpreadGroups,
+  downloadPdfBytes,
+  loadPdfDocumentProperties,
+  loadPdfOutline,
+  pagesForScrollPageMode,
+  printPdfBytes,
+  resolvePdfScale,
+  scaleByDelta,
+  searchPdfText,
+  type PageTextIndex,
+  useHandPan,
+  usePageVisibility,
+  usePdfViewerShortcuts,
+  type CursorTool,
+  type FindMatch,
+  type OutlineItem,
+  type PdfDocumentProperties,
+  type ScrollMode,
+  type SidePanelTab,
+  type SpreadMode,
+} from '@/features/pdf-viewer';
+import { toNormalizedPoint } from '@/shared/lib/coords';
 import {
   centerFromHighlightRects,
   clientRectsToHighlightDtos,
-  findPresentationRectAtPoint,
   mergePdfSelectionRects,
   selectionIsInsideElement,
 } from '@/shared/lib/selectionHighlight';
@@ -37,64 +80,317 @@ type PdfWorkspaceProps = {
   documentId: string;
 };
 
-type CommentPlacementDraft = {
-  pageIndex: number;
-  relX: number;
-  relY: number;
-  highlightRects: HighlightRectDto[];
-};
+const rootCommentsOnPage = (items: CommentDto[], pageIndex: number) =>
+  items.filter((item) => !item.parentCommentId && item.pageIndex === pageIndex);
 
-/** Доля страницы: запасной маркер для старых комментариев без highlightRects. */
-const LEGACY_HIGHLIGHT_WIDTH_PCT = 34;
-const LEGACY_HIGHLIGHT_HEIGHT_PCT = 2.35;
-
-const sortComments = (items: CommentDto[]) =>
-  [...items].sort((a, b) => {
-    if (a.pageIndex !== b.pageIndex) {
-      return a.pageIndex - b.pageIndex;
-    }
-    return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-  });
+const clampPage = (page: number, numPages: number) =>
+  Math.min(Math.max(page, 1), Math.max(numPages, 1));
 
 export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
-  const { ref: canvasRef, width: containerWidth } = useContainerWidth<HTMLDivElement>();
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('lg'));
+
+  const {
+    ref: scrollContainerRef,
+    elementRef: scrollContainerElementRef,
+    width: containerWidth,
+    height: containerHeight,
+  } = useContainerWidth<HTMLDivElement>();
+  const viewerContainerRef = useRef<HTMLDivElement>(null);
+
   const { data: document, isPending, isError, error } = useDocumentQuery(documentId);
   const { data: comments = [] } = useCommentsQuery(documentId);
-  const deleteMutation = useDeleteCommentMutation(documentId);
+  const createMutation = useCreateCommentMutation(documentId);
   const pdfFile = usePdfFileData(document?.pdfUrl);
 
+  const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
   const [pageNumber, setPageNumber] = useState(1);
   const [numPages, setNumPages] = useState(0);
-  const [placementMode, setPlacementMode] = useState(false);
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [draft, setDraft] = useState<CommentPlacementDraft | null>(null);
+  const [currentScaleValue, setCurrentScaleValue] = useState(DEFAULT_SCALE_VALUE);
+  const [currentScale, setCurrentScale] = useState(DEFAULT_SCALE);
+  const [pageLayoutWidth, setPageLayoutWidth] = useState(720);
+  const [rotation, setRotation] = useState(0);
+  const [scrollMode, setScrollMode] = useState<ScrollMode>('page');
+  const [spreadMode, setSpreadMode] = useState<SpreadMode>('none');
+  const [cursorTool, setCursorTool] = useState<CursorTool>('select');
+  const [sidePanelTab, setSidePanelTab] = useState<SidePanelTab>('none');
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findCaseSensitive, setFindCaseSensitive] = useState(false);
+  const [findMatches, setFindMatches] = useState<FindMatch[]>([]);
+  const [activeFindIndex, setActiveFindIndex] = useState(0);
+  const [findSearching, setFindSearching] = useState(false);
+  const [findPageIndices, setFindPageIndices] = useState<Map<number, PageTextIndex>>(
+    () => new Map(),
+  );
+  const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null);
+  const [propertiesOpen, setPropertiesOpen] = useState(false);
+  const [documentProperties, setDocumentProperties] = useState<PdfDocumentProperties | null>(
+    null,
+  );
+  const [outline, setOutline] = useState<OutlineItem[]>([]);
+  const [outlineLoading, setOutlineLoading] = useState(false);
+  const [attachments, setAttachments] = useState<{ filename: string }[]>([]);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+
+  const [commentTool, setCommentTool] = useState<CommentTool>('view');
+  const [highlightColor, setHighlightColor] = useState(loadStoredHighlightColor);
+  const [pendingDraft, setPendingDraft] = useState<PendingCommentDraft | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [dialogKey, setDialogKey] = useState(0);
 
-  const pageSurfaceRef = useRef<HTMLDivElement>(null);
+  const applyHighlightColor = useCallback((color: string) => {
+    setHighlightColor(color);
+    storeHighlightColor(color);
+    setPendingDraft((draft) => (draft ? { ...draft, highlightColor: color } : draft));
+  }, []);
 
-  const sortedComments = useMemo(() => sortComments(comments), [comments]);
-  const pageComments = useMemo(
-    () => sortedComments.filter((item) => item.pageIndex === pageNumber - 1),
-    [sortedComments, pageNumber],
+  const openPendingDraft = useCallback(
+    (draft: Omit<PendingCommentDraft, 'highlightColor'>) => {
+      setPendingDraft({ ...draft, highlightColor });
+      setCommentTool('view');
+    },
+    [highlightColor],
   );
 
-  const pageWidth = Math.max(280, Math.min(containerWidth - 16, 960));
+  const annotationActive = commentTool !== 'view';
+  const handPanEnabled = commentTool === 'view' && cursorTool === 'hand' && !pendingDraft;
+  const findActive = findOpen && Boolean(findQuery.trim());
+  const enablePdfTextLayer = (commentTool === 'text' && !pendingDraft) || findActive;
+  const pageWidth = Math.max(120, Math.round(pageLayoutWidth));
+  const activeFindMatch = findMatches[activeFindIndex] ?? null;
+
+  const closeFind = useCallback(() => {
+    const container = scrollContainerElementRef.current;
+    const scrollTop = container?.scrollTop ?? 0;
+    const scrollLeft = container?.scrollLeft ?? 0;
+
+    setFindOpen(false);
+    setFindQuery('');
+    setFindMatches([]);
+    setFindPageIndices(new Map());
+    setActiveFindIndex(0);
+    setFindSearching(false);
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = scrollContainerElementRef.current;
+        if (!el) {
+          return;
+        }
+        el.scrollTop = scrollTop;
+        el.scrollLeft = scrollLeft;
+      });
+    });
+  }, []);
+
+  useHandPan(handPanEnabled, scrollContainerElementRef);
+
+  const goToPage = useCallback(
+    (page: number) => {
+      setPageNumber(clampPage(page, numPages));
+      const container = scrollContainerElementRef.current;
+      const target = container?.querySelector<HTMLElement>(`[data-pdf-page="${String(page)}"]`);
+      target?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    },
+    [numPages],
+  );
+
+  usePageVisibility(
+    scrollContainerElementRef,
+    scrollMode !== 'page' && numPages > 0,
+    (page) => setPageNumber(page),
+  );
 
   useEffect(() => {
-    if (!placementMode || pdfFile.status !== 'ready') {
+    if (!pdf || containerWidth < 80) {
+      return;
+    }
+    const height = containerHeight > 0 ? containerHeight : window.innerHeight;
+    let cancelled = false;
+    void resolvePdfScale({
+      pdf,
+      pageNumber,
+      scaleValue: currentScaleValue,
+      containerWidth,
+      containerHeight: height,
+      rotation,
+      scrollHorizontal: scrollMode === 'horizontal',
+    }).then((result) => {
+      if (!cancelled) {
+        setCurrentScale(result.scale);
+        setPageLayoutWidth(result.pageWidth);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    pdf,
+    pageNumber,
+    currentScaleValue,
+    containerWidth,
+    containerHeight,
+    rotation,
+    scrollMode,
+  ]);
+
+  const loadSidePanelData = useCallback(async (loadedPdf: PDFDocumentProxy) => {
+    setOutlineLoading(true);
+    setAttachmentsLoading(true);
+    try {
+      const [outlineResult, rawAttachments] = await Promise.all([
+        loadPdfOutline(loadedPdf),
+        loadedPdf.getAttachments().catch(() => null),
+      ]);
+      setOutline(outlineResult);
+      if (!rawAttachments) {
+        setAttachments([]);
+      } else {
+        const items = Object.values(rawAttachments) as { filename?: string }[];
+        setAttachments(
+          items.map((item) => ({
+            filename: item.filename ?? 'attachment',
+          })),
+        );
+      }
+    } finally {
+      setOutlineLoading(false);
+      setAttachmentsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!pdf || !findOpen || !findQuery.trim()) {
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void searchPdfText(pdf, findQuery, findCaseSensitive)
+        .then(({ matches, pageIndices }) => {
+          if (cancelled) {
+            return;
+          }
+          setFindSearching(false);
+          setFindMatches(matches);
+          setFindPageIndices(pageIndices);
+          setActiveFindIndex(0);
+          if (matches[0]) {
+            goToPage(matches[0].pageIndex + 1);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setFindSearching(false);
+          }
+        });
+    }, 280);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [pdf, findOpen, findQuery, findCaseSensitive, goToPage]);
+
+  useEffect(() => {
+    if (!findActive || !findMatches.length) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      scrollContainerElementRef.current
+        ?.querySelector('.pdf-find-mark--active')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [activeFindIndex, findMatches, findActive, pageLayoutWidth, currentScale]);
+
+  const handleFindQueryChange = (value: string) => {
+    setFindQuery(value);
+    if (!value.trim()) {
+      setFindMatches([]);
+      setFindPageIndices(new Map());
+      setActiveFindIndex(0);
+      setFindSearching(false);
+      return;
+    }
+    setFindSearching(true);
+  };
+
+  const navigateFind = (direction: 1 | -1) => {
+    if (!findMatches.length) {
+      return;
+    }
+    const nextIndex = (activeFindIndex + direction + findMatches.length) % findMatches.length;
+    setActiveFindIndex(nextIndex);
+    goToPage(findMatches[nextIndex].pageIndex + 1);
+  };
+
+  const applyNumericZoom = (next: number) => {
+    const prev = currentScale;
+    setCurrentScale(next);
+    setCurrentScaleValue(String(next));
+    if (prev > 0) {
+      setPageLayoutWidth((layout) => Math.max(120, Math.round(layout * (next / prev))));
+    }
+  };
+
+  const zoomIn = () => {
+    applyNumericZoom(scaleByDelta(currentScale, 1));
+  };
+
+  const zoomOut = () => {
+    applyNumericZoom(scaleByDelta(currentScale, -1));
+  };
+
+  const handleDownload = () => {
+    if (pdfFile.status !== 'ready') {
+      return;
+    }
+    downloadPdfBytes(pdfFile.file.data, document?.title ?? 'document.pdf');
+    setMenuAnchor(null);
+  };
+
+  const handlePrint = () => {
+    if (pdfFile.status !== 'ready') {
+      return;
+    }
+    printPdfBytes(pdfFile.file.data);
+    setMenuAnchor(null);
+  };
+
+  usePdfViewerShortcuts(
+    {
+      onFind: () => setFindOpen(true),
+      onZoomIn: zoomIn,
+      onZoomOut: zoomOut,
+      onNextPage: () => goToPage(pageNumber + 1),
+      onPrevPage: () => goToPage(pageNumber - 1),
+      onFirstPage: () => goToPage(1),
+      onLastPage: () => goToPage(numPages),
+    },
+    pdfFile.status === 'ready',
+  );
+
+  useEffect(() => {
+    if (commentTool !== 'text' || pdfFile.status !== 'ready') {
       return;
     }
     const onWindowMouseUp = () => {
-      const surface = pageSurfaceRef.current;
-      if (!surface) {
+      const container = scrollContainerElementRef.current;
+      if (!container) {
         return;
       }
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed) {
         return;
       }
-      if (!selectionIsInsideElement(selection, surface)) {
+      const surfaces = container.querySelectorAll<HTMLElement>('[data-pdf-page-surface]');
+      const surface = Array.from(surfaces).find((element: HTMLElement) =>
+        selectionIsInsideElement(selection, element),
+      );
+      if (!surface) {
+        return;
+      }
+      const pageIndex = Number(surface.dataset.pdfPageSurface);
+      if (!Number.isFinite(pageIndex)) {
         return;
       }
       const pageRect = surface.getBoundingClientRect();
@@ -105,19 +401,147 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
         return;
       }
       const { relX, relY } = centerFromHighlightRects(highlightRects);
-      setDraft({
-        pageIndex: pageNumber - 1,
-        relX,
-        relY,
-        highlightRects,
-      });
-      setDialogKey((value) => value + 1);
-      setDialogOpen(true);
-      setPlacementMode(false);
+      openPendingDraft({ pageIndex, relX, relY, highlightRects });
     };
     window.addEventListener('mouseup', onWindowMouseUp);
     return () => window.removeEventListener('mouseup', onWindowMouseUp);
-  }, [placementMode, pdfFile.status, pageNumber]);
+  }, [commentTool, pdfFile.status, openPendingDraft]);
+
+  const handleSavePending = async (text: string) => {
+    if (!pendingDraft) {
+      return;
+    }
+    const anchor = centerFromDraft(pendingDraft);
+    const body = {
+      pageIndex: pendingDraft.pageIndex,
+      relX: anchor.relX,
+      relY: anchor.relY,
+      text,
+      ...(pendingDraft.highlightRects?.length
+        ? { highlightRects: pendingDraft.highlightRects }
+        : {}),
+      highlightColor: pendingDraft.highlightColor,
+    };
+    try {
+      await createMutation.mutateAsync(body);
+      storeHighlightColor(pendingDraft.highlightColor);
+      setPendingDraft(null);
+      setCommentTool('view');
+    } catch {
+      /* ошибка показывается в InlineCommentEditor */
+    }
+  };
+
+  const handlePageSurfaceClick: MouseEventHandler<HTMLDivElement> = (event) => {
+    if (pendingDraft || commentTool !== 'pin') {
+      return;
+    }
+    event.stopPropagation();
+    const surface = event.currentTarget;
+    const pageIndex = Number(surface.dataset.pdfPageSurface);
+    if (!Number.isFinite(pageIndex)) {
+      return;
+    }
+    const pageRect = surface.getBoundingClientRect();
+    const { relX, relY } = toNormalizedPoint(event.clientX, event.clientY, pageRect);
+    openPendingDraft({
+      pageIndex,
+      relX,
+      relY,
+      highlightRects: [pinHighlightRect(relX, relY)],
+    });
+  };
+
+  const visiblePages = useMemo(() => {
+    if (scrollMode === 'page') {
+      return pagesForScrollPageMode(pageNumber, numPages, spreadMode);
+    }
+    return buildSpreadGroups(numPages, spreadMode).flat();
+  }, [scrollMode, pageNumber, numPages, spreadMode]);
+
+  const renderSpreadRow = (pages: number[], rowKey: string, evenPadLeft = false) => (
+    <Stack
+      key={rowKey}
+      direction="row"
+      spacing={2}
+      sx={{ justifyContent: 'center', alignItems: 'flex-start', mb: 2, maxWidth: '100%' }}
+    >
+      {evenPadLeft && (
+        <Box sx={{ width: pageWidth, flexShrink: 0, visibility: 'hidden' }} aria-hidden />
+      )}
+      {pages.map((page) => {
+        const pageIndex = page - 1;
+        const pageComments = rootCommentsOnPage(comments, pageIndex);
+        const pageTextIndex = findPageIndices.get(pageIndex);
+        const pageFindMatches = findMatches.filter((match) => match.pageIndex === pageIndex);
+        const findTextRenderer =
+          findActive && pageTextIndex
+            ? createFindTextRenderer({
+                pageIndex,
+                pageTextIndex,
+                pageMatches: pageFindMatches,
+                activeMatch: activeFindMatch,
+              })
+            : undefined;
+        return (
+          <Box
+            key={page}
+            data-pdf-page={page}
+            data-pdf-page-surface={page - 1}
+            data-editor-open={pendingDraft?.pageIndex === page - 1 ? 'true' : undefined}
+            onClick={handlePageSurfaceClick}
+            sx={{
+              position: 'relative',
+              display: 'inline-block',
+              flexShrink: 0,
+              cursor: commentTool === 'pin' && !pendingDraft ? 'crosshair' : undefined,
+            }}
+          >
+            <Page
+              key={`${String(page)}-${String(pageLayoutWidth)}-${String(rotation)}`}
+              pageNumber={page}
+              width={pageWidth}
+              rotate={rotation}
+              renderAnnotationLayer
+              renderTextLayer={enablePdfTextLayer}
+              customTextRenderer={findTextRenderer}
+            />
+            <PageAnnotationLayer
+              pageIndex={page - 1}
+              tool={commentTool}
+              highlightColor={highlightColor}
+              comments={pageComments}
+              selectedId={selectedId}
+              pendingDraft={pendingDraft}
+              saving={createMutation.isPending}
+              saveError={
+                createMutation.isError ? (createMutation.error as Error).message : undefined
+              }
+              onSelect={setSelectedId}
+              onPendingDraft={openPendingDraft}
+              onUpdateDraftColor={applyHighlightColor}
+              onSave={(text) => void handleSavePending(text)}
+              onCancelPending={() => setPendingDraft(null)}
+            />
+          </Box>
+        );
+      })}
+    </Stack>
+  );
+
+  const openDocumentProperties = async () => {
+    if (!pdf || pdfFile.status !== 'ready') {
+      return;
+    }
+    setPropertiesOpen(true);
+    const props = await loadPdfDocumentProperties({
+      pdf,
+      fileName: document?.title ?? 'document.pdf',
+      fileSizeBytes: pdfFile.file.data.byteLength,
+    });
+    setDocumentProperties(props);
+    setMenuAnchor(null);
+  };
 
   if (isPending) {
     return (
@@ -138,88 +562,100 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
     );
   }
 
-  const handleSurfaceClick: MouseEventHandler<HTMLDivElement> = (event) => {
-    if (!placementMode) {
-      return;
-    }
-    const surface = pageSurfaceRef.current;
-    if (!surface) {
-      return;
-    }
-    const glyph = findPresentationRectAtPoint(event.clientX, event.clientY, surface);
-    if (!glyph) {
-      return;
-    }
-    const highlightRects = clientRectsToHighlightDtos([glyph], surface.getBoundingClientRect());
-    if (!highlightRects.length) {
-      return;
-    }
-    const { relX, relY } = centerFromHighlightRects(highlightRects);
-    setDraft({
-      pageIndex: pageNumber - 1,
-      relX,
-      relY,
-      highlightRects,
-    });
-    setDialogKey((value) => value + 1);
-    setDialogOpen(true);
-    setPlacementMode(false);
+  const scrollContainerSx = {
+    flex: 1,
+    minHeight: 0,
+    height: '100%',
+    overflow: 'auto',
+    p: { xs: 1, sm: 2 },
+    cursor: handPanEnabled ? 'grab' : 'default',
+    userSelect: commentTool === 'text' ? 'text' : annotationActive ? 'none' : 'auto',
+    ...(scrollMode === 'horizontal' && {
+      display: 'flex',
+      flexDirection: 'row',
+      flexWrap: 'nowrap',
+      gap: 2,
+    }),
+    ...(scrollMode === 'wrapped' && {
+      display: 'flex',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 2,
+      alignContent: 'flex-start',
+    }),
+    ...(scrollMode === 'vertical' && {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+    }),
   };
 
   return (
     <>
-      <Stack direction="row" sx={{ height: '100%', minHeight: 0 }}>
-        <Stack sx={{ flex: 1, minWidth: 0, p: 2, gap: 2, overflow: 'auto' }}>
-          <Stack
-            direction={{ xs: 'column', md: 'row' }}
-            spacing={1}
-            sx={{ alignItems: 'flex-start' }}
-          >
-            <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography variant="h5" gutterBottom sx={{ fontWeight: 600 }}>
-                {document.title}
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Включите режим ниже, затем выделите текст мышью на странице (как в редакторе) — под
-                выделение попадут точные прямоугольники. Либо один раз кликните по букве: подсветится
-                соответствующий фрагмент text layer.
-              </Typography>
-            </Box>
-            <ToggleButton
-              value="placement"
-              selected={placementMode}
-              onChange={() => setPlacementMode((value) => !value)}
-              color="primary"
-            >
-              Указать комментарий на странице
-            </ToggleButton>
-          </Stack>
+      <Stack
+        direction={{ xs: 'column', lg: 'row' }}
+        sx={{ height: '100%', minHeight: 0, overflow: 'hidden' }}
+      >
+        <Stack sx={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
+          <Box sx={{ px: 2, pt: 1.5, pb: 0.5, flexShrink: 0 }}>
+            <Typography variant="h6" sx={{ fontWeight: 600 }} noWrap title={document.title}>
+              {document.title}
+            </Typography>
+          </Box>
 
-          <Stack direction="row" spacing={2} sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-            <Pagination
-              color="primary"
-              count={Math.max(numPages, 1)}
-              page={pageNumber}
-              onChange={(_, page) => setPageNumber(page)}
-              disabled={numPages === 0}
+          <PdfViewerToolbar
+            pageNumber={pageNumber}
+            numPages={numPages}
+            currentScaleValue={currentScaleValue}
+            currentScale={currentScale}
+            sidePanelOpen={sidePanelTab !== 'none'}
+            findOpen={findOpen}
+            onPageNumberChange={(page) => goToPage(page)}
+            onPrevPage={() => goToPage(pageNumber - 1)}
+            onNextPage={() => goToPage(pageNumber + 1)}
+            onFirstPage={() => goToPage(1)}
+            onLastPage={() => goToPage(numPages)}
+            onZoomIn={zoomIn}
+            onZoomOut={zoomOut}
+            onScaleValueChange={setCurrentScaleValue}
+            onToggleSidePanel={() =>
+              setSidePanelTab((tab) => (tab === 'none' ? 'thumbnails' : 'none'))
+            }
+            onToggleFind={() => (findOpen ? closeFind() : setFindOpen(true))}
+            onOpenMenu={setMenuAnchor}
+          />
+
+          {findOpen && (
+            <PdfFindBar
+              query={findQuery}
+              caseSensitive={findCaseSensitive}
+              matchCount={findMatches.length}
+              activeMatchIndex={activeFindIndex}
+              searching={findSearching}
+              onQueryChange={handleFindQueryChange}
+              onCaseSensitiveChange={setFindCaseSensitive}
+              onPrev={() => navigateFind(-1)}
+              onNext={() => navigateFind(1)}
+              onClose={closeFind}
             />
-            {placementMode && (
-              <Chip label="Режим выбора на странице" color="primary" variant="outlined" />
-            )}
-          </Stack>
+          )}
+
+          <CommentToolsBar
+            tool={commentTool}
+            highlightColor={highlightColor}
+            onHighlightColorChange={applyHighlightColor}
+            onToolChange={(tool) => {
+              setCommentTool(tool);
+              if (tool !== 'view') {
+                setPendingDraft(null);
+                setCursorTool('select');
+              }
+            }}
+          />
 
           <Box
-            ref={canvasRef}
-            sx={{
-              borderRadius: 2,
-              border: 1,
-              borderColor: 'divider',
-              bgcolor: 'background.paper',
-              p: 2,
-              display: 'flex',
-              justifyContent: 'center',
-              cursor: placementMode ? 'crosshair' : 'default',
-            }}
+            ref={viewerContainerRef}
+            sx={{ flex: 1, minHeight: 0, display: 'flex', position: 'relative', overflow: 'hidden' }}
           >
             {pdfFile.status === 'error' && (
               <Alert severity="error" sx={{ m: 2 }}>
@@ -229,14 +665,10 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
                 <Typography variant="body2" color="text.secondary">
                   {pdfFile.message}
                 </Typography>
-                <Typography variant="body2" sx={{ mt: 1 }} color="text.secondary">
-                  Для <code>/sample.pdf</code> выполните <code>npm run ensure-sample-pdf</code>. Для
-                  внешних URL нужен CORS или прокси на вашем домене.
-                </Typography>
               </Alert>
             )}
             {(pdfFile.status === 'idle' || pdfFile.status === 'loading') && (
-              <Stack spacing={1} sx={{ py: 6, alignItems: 'center' }}>
+              <Stack spacing={1} sx={{ py: 6, alignItems: 'center', flex: 1 }}>
                 <CircularProgress />
                 <Typography color="text.secondary">Загружаем файл PDF…</Typography>
               </Stack>
@@ -246,131 +678,90 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
                 key={`${document.id}:${document.pdfUrl}`}
                 file={pdfFile.file}
                 loading={
-                  <Stack spacing={1} sx={{ py: 6, alignItems: 'center' }}>
+                  <Stack spacing={1} sx={{ py: 6, alignItems: 'center', flex: 1 }}>
                     <CircularProgress />
                     <Typography color="text.secondary">Разбираем PDF…</Typography>
                   </Stack>
                 }
                 error={
                   <Alert severity="error" sx={{ m: 2 }}>
-                    Файл загружен, но pdf.js не смог его открыть. Проверьте, что это неповреждённый
-                    PDF, и обновите страницу.
+                    Файл загружен, но pdf.js не смог его открыть.
                   </Alert>
                 }
-                onLoadSuccess={({ numPages: nextTotal }) => {
-                  setNumPages(nextTotal);
-                  setPageNumber((current) => Math.min(current, Math.max(nextTotal, 1)));
+                onLoadSuccess={(loadedPdf) => {
+                  setPdf(loadedPdf);
+                  setNumPages(loadedPdf.numPages);
+                  setPageNumber((current) =>
+                    Math.min(current, Math.max(loadedPdf.numPages, 1)),
+                  );
+                  void loadSidePanelData(loadedPdf);
                 }}
               >
-                <Box
-                  ref={pageSurfaceRef}
-                  sx={{ position: 'relative', display: 'inline-block' }}
-                  onClick={handleSurfaceClick}
-                >
-                  <Page
-                    pageNumber={pageNumber}
-                    width={pageWidth}
-                    renderAnnotationLayer
-                    renderTextLayer
-                  />
+                <Box sx={{ display: 'flex', flex: 1, minHeight: 0, width: '100%', position: 'relative' }}>
+                  {sidePanelTab !== 'none' && isMobile && (
+                    <Box
+                      aria-hidden
+                      onClick={() => setSidePanelTab('none')}
+                      sx={{
+                        position: 'absolute',
+                        inset: 0,
+                        bgcolor: 'rgba(0,0,0,0.4)',
+                        zIndex: 8,
+                      }}
+                    />
+                  )}
+                  {sidePanelTab !== 'none' && (
+                    <Box
+                      sx={{
+                        position: { xs: 'absolute', lg: 'static' },
+                        left: 0,
+                        top: 0,
+                        bottom: 0,
+                        zIndex: 9,
+                        flexShrink: 0,
+                      }}
+                    >
+                      <PdfSidePanel
+                        tab={sidePanelTab}
+                        onTabChange={setSidePanelTab}
+                        numPages={numPages}
+                        pageNumber={pageNumber}
+                        onPageSelect={(page) => {
+                          goToPage(page);
+                          if (isMobile) {
+                            setSidePanelTab('none');
+                          }
+                        }}
+                        outline={outline}
+                        outlineLoading={outlineLoading}
+                        attachments={attachments}
+                        attachmentsLoading={attachmentsLoading}
+                      />
+                    </Box>
+                  )}
                   <Box
-                    sx={{
-                      position: 'absolute',
-                      inset: 0,
-                      pointerEvents: 'none',
-                    }}
+                    sx={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', overflow: 'hidden' }}
                   >
-                    {pageComments.map((comment) => {
-                      const selected = selectedId === comment.id;
-                      const rects =
-                        comment.highlightRects && comment.highlightRects.length > 0
-                          ? comment.highlightRects
-                          : null;
-                      const segmentStyle = {
-                        pointerEvents: 'auto' as const,
-                        cursor: 'pointer' as const,
-                        borderRadius: '1px',
-                        bgcolor: (theme: Theme) =>
-                          selected
-                            ? alpha(theme.palette.primary.main, 0.42)
-                            : alpha(theme.palette.primary.main, 0.26),
-                        boxShadow: selected
-                          ? (theme: Theme) => `inset 0 0 0 2px ${theme.palette.primary.main}`
-                          : 'none',
-                        zIndex: selected ? 2 : 1,
-                        transition: (theme: Theme) =>
-                          theme.transitions.create(['background-color', 'box-shadow'], {
-                            duration: theme.transitions.duration.shorter,
-                          }),
-                      };
-                      if (rects) {
-                        return (
-                          <Fragment key={comment.id}>
-                            {rects.map((r, index) => (
-                              <Tooltip
-                                key={`${comment.id}-${String(index)}`}
-                                title={comment.text}
-                                followCursor
-                              >
-                                <Box
-                                  role="button"
-                                  tabIndex={0}
-                                  aria-label={`Комментарий, страница ${comment.pageIndex + 1}: ${comment.text}`}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    setSelectedId(comment.id);
-                                  }}
-                                  onKeyDown={(event) => {
-                                    if (event.key === 'Enter' || event.key === ' ') {
-                                      event.preventDefault();
-                                      event.stopPropagation();
-                                      setSelectedId(comment.id);
-                                    }
-                                  }}
-                                  sx={{
-                                    position: 'absolute',
-                                    left: `${r.relLeft * 100}%`,
-                                    top: `${r.relTop * 100}%`,
-                                    width: `${r.relWidth * 100}%`,
-                                    height: `${r.relHeight * 100}%`,
-                                    ...segmentStyle,
-                                  }}
-                                />
-                              </Tooltip>
-                            ))}
-                          </Fragment>
-                        );
-                      }
-                      return (
-                        <Tooltip key={comment.id} title={comment.text} followCursor>
-                          <Box
-                            role="button"
-                            tabIndex={0}
-                            aria-label={`Комментарий, страница ${comment.pageIndex + 1}: ${comment.text}`}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setSelectedId(comment.id);
-                            }}
-                            onKeyDown={(event) => {
-                              if (event.key === 'Enter' || event.key === ' ') {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                setSelectedId(comment.id);
-                              }
-                            }}
-                            sx={{
-                              position: 'absolute',
-                              left: `${comment.relX * 100}%`,
-                              top: `${comment.relY * 100}%`,
-                              width: `${LEGACY_HIGHLIGHT_WIDTH_PCT}%`,
-                              height: `${LEGACY_HIGHLIGHT_HEIGHT_PCT}%`,
-                              transform: 'translate(-12%, -50%)',
-                              ...segmentStyle,
-                            }}
-                          />
-                        </Tooltip>
-                      );
-                    })}
+                    <Box ref={scrollContainerRef} sx={scrollContainerSx}>
+                      {scrollMode === 'page' &&
+                        buildSpreadGroups(numPages, spreadMode)
+                          .filter((group) => group.some((page) => visiblePages.includes(page)))
+                          .map((group, index) =>
+                            renderSpreadRow(
+                              group,
+                              `spread-${String(index)}`,
+                              spreadMode === 'even' && group[0] === 1,
+                            ),
+                          )}
+                      {scrollMode !== 'page' &&
+                        buildSpreadGroups(numPages, spreadMode).map((group, index) =>
+                          renderSpreadRow(
+                            group,
+                            `scroll-${String(index)}`,
+                            spreadMode === 'even' && group[0] === 1,
+                          ),
+                        )}
+                    </Box>
                   </Box>
                 </Box>
               </Document>
@@ -378,84 +769,43 @@ export const PdfWorkspace = ({ documentId }: PdfWorkspaceProps) => {
           </Box>
         </Stack>
 
-        <Paper
-          elevation={0}
-          square
-          sx={{
-            width: { xs: '100%', md: 360 },
-            borderLeft: { md: 1 },
-            borderTop: { xs: 1, md: 0 },
-            borderColor: 'divider',
-            display: 'flex',
-            flexDirection: 'column',
-            minHeight: { xs: 320, md: 'auto' },
-          }}
-        >
-          <Box sx={{ p: 2 }}>
-            <Typography variant="h6" sx={{ fontWeight: 600 }}>
-              Комментарии
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              {sortedComments.length} шт.
-            </Typography>
-          </Box>
-          <Divider />
-          <List dense sx={{ py: 0, overflow: 'auto', flex: 1 }}>
-            {sortedComments.map((comment) => (
-              <ListItem
-                key={comment.id}
-                disablePadding
-                secondaryAction={
-                  <Tooltip title="Удалить">
-                    <span>
-                      <IconButton
-                        edge="end"
-                        size="small"
-                        onClick={() => void deleteMutation.mutateAsync(comment.id)}
-                        disabled={deleteMutation.isPending}
-                      >
-                        <DeleteOutlineIcon fontSize="small" />
-                      </IconButton>
-                    </span>
-                  </Tooltip>
-                }
-              >
-                <ListItemButton
-                  selected={selectedId === comment.id}
-                  onClick={() => {
-                    setSelectedId(comment.id);
-                    setPageNumber(comment.pageIndex + 1);
-                  }}
-                  alignItems="flex-start"
-                >
-                  <Stack spacing={0.5} sx={{ pr: 4 }}>
-                    <Typography variant="caption" color="text.secondary">
-                      стр. {comment.pageIndex + 1} · {comment.author.name}
-                    </Typography>
-                    <Typography variant="body2">{comment.text}</Typography>
-                  </Stack>
-                </ListItemButton>
-              </ListItem>
-            ))}
-            {sortedComments.length === 0 && (
-              <Box sx={{ p: 2 }}>
-                <Typography variant="body2" color="text.secondary">
-                  Пока нет комментариев. Добавьте первый, выделив текст на странице.
-                </Typography>
-              </Box>
-            )}
-          </List>
-        </Paper>
+        <CommentsPanel
+          documentId={documentId}
+          comments={comments}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          onNavigate={(pageIndex) => goToPage(pageIndex + 1)}
+        />
       </Stack>
 
-      <AddCommentDialog
-        key={dialogKey}
-        documentId={documentId}
-        open={dialogOpen}
-        draft={draft}
+      <PdfViewerMenu
+        anchorEl={menuAnchor}
+        open={Boolean(menuAnchor)}
+        onClose={() => setMenuAnchor(null)}
+        scrollMode={scrollMode}
+        spreadMode={spreadMode}
+        cursorTool={cursorTool}
+        rotation={rotation}
+        onScrollModeChange={setScrollMode}
+        onSpreadModeChange={setSpreadMode}
+        onCursorToolChange={setCursorTool}
+        onRotateCw={() => setRotation((value) => (value + 90) % 360)}
+        onRotateCcw={() => setRotation((value) => (value + 270) % 360)}
+        onDownload={handleDownload}
+        onPrint={handlePrint}
+        onPresentationMode={() => {
+          void viewerContainerRef.current?.requestFullscreen();
+          setMenuAnchor(null);
+        }}
+        onDocumentProperties={() => void openDocumentProperties()}
+      />
+
+      <DocumentPropertiesDialog
+        open={propertiesOpen}
+        properties={documentProperties}
         onClose={() => {
-          setDialogOpen(false);
-          setDraft(null);
+          setPropertiesOpen(false);
+          setDocumentProperties(null);
         }}
       />
     </>
