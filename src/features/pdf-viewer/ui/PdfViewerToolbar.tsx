@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import {
   ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
@@ -87,6 +88,29 @@ export const PdfViewerToolbar = ({
   const selectValue = presetOption?.value ?? CUSTOM_SCALE_SELECT_VALUE;
   const selectedLabel = resolveScaleLabel(currentScaleValue, currentScale);
 
+  const [pageInput, setPageInput] = useState(String(pageNumber));
+  const pageInputFocused = useRef(false);
+
+  useEffect(() => {
+    if (!pageInputFocused.current) {
+      setPageInput(String(pageNumber));
+    }
+  }, [pageNumber]);
+
+  const commitPageInput = () => {
+    const trimmed = pageInput.trim();
+    if (!trimmed) {
+      setPageInput(String(pageNumber));
+      return;
+    }
+    const parsed = Number.parseInt(trimmed, 10);
+    if (!Number.isFinite(parsed)) {
+      setPageInput(String(pageNumber));
+      return;
+    }
+    onPageNumberChange(parsed);
+  };
+
   const handleScaleChange = (value: string) => {
     if (value === CUSTOM_SCALE_SELECT_VALUE) {
       return;
@@ -153,18 +177,26 @@ export const PdfViewerToolbar = ({
 
         <TextField
           size="small"
-          type="number"
-          value={pageNumber}
-          onChange={(event) => {
-            const next = Number(event.target.value);
-            if (Number.isFinite(next)) {
-              onPageNumberChange(next);
+          type="text"
+          inputMode="numeric"
+          value={pageInput}
+          onChange={(event) => setPageInput(event.target.value.replace(/\D/g, ''))}
+          onFocus={() => {
+            pageInputFocused.current = true;
+          }}
+          onBlur={() => {
+            pageInputFocused.current = false;
+            commitPageInput();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              event.currentTarget.blur();
             }
           }}
           slotProps={{
             htmlInput: {
-              min: 1,
-              max: Math.max(numPages, 1),
+              'aria-label': 'Номер страницы',
               style: { width: 48, textAlign: 'center' },
             },
           }}
