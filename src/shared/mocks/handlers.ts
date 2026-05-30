@@ -3,8 +3,10 @@ import type {
   CommentDto,
   CreateCommentBody,
   HighlightRectDto,
+  UpdateCommentBody,
 } from '@/entities/comment/model/types';
 import type { DocumentDto } from '@/entities/document/model/types';
+import { isValidHighlightColor } from '@/features/manage-comments/model/highlightColors';
 import documentsSeed from '@/shared/mocks/data/documents.json';
 import commentsSeed from '@/shared/mocks/data/comments.json';
 
@@ -14,6 +16,8 @@ const comments: CommentDto[] = structuredClone(commentsSeed as CommentDto[]);
 const defaultAuthor = { id: 'user-demo', name: 'Демо-пользователь' };
 
 const findDocument = (id: string) => documents.find((item) => item.id === id);
+
+const findComment = (id: string) => comments.find((item) => item.id === id);
 
 const isValidHighlightRect = (value: unknown): value is HighlightRectDto => {
   if (!value || typeof value !== 'object') {
@@ -40,7 +44,6 @@ const parseOptionalUser = (request: Request) => {
 };
 
 export const handlers = [
-  // Явный passthrough: статика из public/ не должна обрабатываться моками API.
   http.get('*/sample.pdf', () => passthrough()),
   http.get('/api/documents', () => HttpResponse.json(documents)),
 
@@ -67,14 +70,42 @@ export const handlers = [
       return HttpResponse.json({ message: 'Документ не найден' }, { status: 404 });
     }
     const body = (await request.json()) as Partial<CreateCommentBody>;
+    if (typeof body.text !== 'string' || !body.text.trim()) {
+      return HttpResponse.json({ message: 'Некорректное тело запроса' }, { status: 400 });
+    }
+
+    const author = parseOptionalUser(request);
+
+    if (body.parentCommentId) {
+      const parent = findComment(body.parentCommentId);
+      if (!parent || parent.documentId !== documentId || parent.parentCommentId) {
+        return HttpResponse.json({ message: 'Родительский комментарий не найден' }, { status: 400 });
+      }
+      const reply: CommentDto = {
+        id: `cmt-${crypto.randomUUID()}`,
+        documentId,
+        pageIndex: parent.pageIndex,
+        relX: parent.relX,
+        relY: parent.relY,
+        ...(parent.highlightColor ? { highlightColor: parent.highlightColor } : {}),
+        text: body.text.trim(),
+        author,
+        createdAt: new Date().toISOString(),
+        resolved: false,
+        parentCommentId: parent.id,
+      };
+      comments.push(reply);
+      return HttpResponse.json(reply, { status: 201 });
+    }
+
     if (
       typeof body.pageIndex !== 'number' ||
       typeof body.relX !== 'number' ||
-      typeof body.relY !== 'number' ||
-      typeof body.text !== 'string'
+      typeof body.relY !== 'number'
     ) {
       return HttpResponse.json({ message: 'Некорректное тело запроса' }, { status: 400 });
     }
+
     let highlightRects: HighlightRectDto[] | undefined;
     if (body.highlightRects !== undefined) {
       if (!Array.isArray(body.highlightRects) || body.highlightRects.length === 0) {
@@ -85,7 +116,15 @@ export const handlers = [
       }
       highlightRects = body.highlightRects;
     }
-    const author = parseOptionalUser(request);
+
+    let highlightColor: string | undefined;
+    if (body.highlightColor !== undefined) {
+      if (typeof body.highlightColor !== 'string' || !isValidHighlightColor(body.highlightColor)) {
+        return HttpResponse.json({ message: 'Некорректный цвет подсветки' }, { status: 400 });
+      }
+      highlightColor = body.highlightColor;
+    }
+
     const comment: CommentDto = {
       id: `cmt-${crypto.randomUUID()}`,
       documentId,
@@ -93,9 +132,11 @@ export const handlers = [
       relX: body.relX,
       relY: body.relY,
       ...(highlightRects ? { highlightRects } : {}),
+      ...(highlightColor ? { highlightColor } : {}),
       text: body.text.trim(),
       author,
       createdAt: new Date().toISOString(),
+      resolved: false,
     };
     comments.push(comment);
     return HttpResponse.json(comment, { status: 201 });
@@ -107,15 +148,35 @@ export const handlers = [
     if (index === -1) {
       return HttpResponse.json({ message: 'Комментарий не найден' }, { status: 404 });
     }
-    const body = (await request.json()) as { text?: string };
-    if (typeof body.text !== 'string' || !body.text.trim()) {
-      return HttpResponse.json({ message: 'Текст обязателен' }, { status: 400 });
+    const body = (await request.json()) as UpdateCommentBody;
+    if (body.text !== undefined) {
+      if (typeof body.text !== 'string' || !body.text.trim()) {
+        return HttpResponse.json({ message: 'Текст обязателен' }, { status: 400 });
+      }
     }
+    if (body.resolved !== undefined && typeof body.resolved !== 'boolean') {
+      return HttpResponse.json({ message: 'Некорректное тело запроса' }, { status: 400 });
+    }
+    if (body.text === undefined && body.resolved === undefined) {
+      return HttpResponse.json({ message: 'Нечего обновлять' }, { status: 400 });
+    }
+
+    const current = comments[index];
     const updated: CommentDto = {
-      ...comments[index],
-      text: body.text.trim(),
+      ...current,
+      ...(body.text !== undefined ? { text: body.text.trim() } : {}),
+      ...(body.resolved !== undefined ? { resolved: body.resolved } : {}),
     };
     comments[index] = updated;
+
+    if (body.resolved === true && !current.parentCommentId) {
+      for (let i = 0; i < comments.length; i += 1) {
+        if (comments[i].parentCommentId === commentId) {
+          comments[i] = { ...comments[i], resolved: true };
+        }
+      }
+    }
+
     return HttpResponse.json(updated);
   }),
 
@@ -125,7 +186,12 @@ export const handlers = [
     if (index === -1) {
       return HttpResponse.json({ message: 'Комментарий не найден' }, { status: 404 });
     }
-    comments.splice(index, 1);
+    const isRoot = !comments[index].parentCommentId;
+    for (let i = comments.length - 1; i >= 0; i -= 1) {
+      if (comments[i].id === commentId || (isRoot && comments[i].parentCommentId === commentId)) {
+        comments.splice(i, 1);
+      }
+    }
     return new HttpResponse(null, { status: 204 });
   }),
 ];
