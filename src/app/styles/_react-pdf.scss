@@ -1,0 +1,42 @@
+@use 'variables' as *;
+
+.react-pdf__Document {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.react-pdf__Page {
+  max-width: none !important;
+
+  canvas {
+    max-width: none !important;
+  }
+}
+
+// Текстовый слой pdf.js перекрывал редактор комментариев (z-index: 2)
+.react-pdf__Page__textContent {
+  z-index: $react-pdf-text-layer-z;
+
+  .pdf-find-mark {
+    // Подсветка поиска: только фон, текст виден с canvas (как у span в textLayer)
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    background-color: $find-mark-bg;
+    border-radius: 2px;
+
+    &--active {
+      background-color: $find-mark-active-bg;
+      box-shadow: 0 0 0 1px $find-mark-active-ring;
+    }
+  }
+}
+
+.react-pdf__Page__annotations {
+  z-index: $react-pdf-annotations-z;
+}
+
+[data-pdf-page-surface][data-editor-open='true'] .react-pdf__Page__textContent {
+  pointer-events: none !important;
+}
